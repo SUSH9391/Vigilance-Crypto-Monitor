@@ -1,0 +1,8 @@
+ccxt
+gunicorn
+joblib
+pandas
+numpy
+dash
+plotly
+python-dotenv
