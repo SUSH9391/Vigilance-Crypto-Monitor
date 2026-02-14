@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+.env
+data/*.csv
+models/*.joblib
+models/*.h5
+.ipynb_checkpoints/
