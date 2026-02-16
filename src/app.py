@@ -1,59 +1,106 @@
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, callback
+import dash_bootstrap_components as dbc
 import plotly.express as px
 import ccxt
 import pandas as pd
 import joblib
+from preprocessing import clean_and_feature_engineer
 
-# Initialize App & CCXT
-app = dash.Dash(__name__)
-server = app.server # Essential for deployment
+# Initialize App with a Dark Theme (Slate/Cyborg)
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.CYBORG])
+server = app.server
 exchange = ccxt.binance()
 
-# Load the "Saved Brain" from Stage 1
+# Load the "Saved Brain"
 model = joblib.load('models/anomaly_detector.joblib')
 features = joblib.load('models/feature_list.joblib')
 
-app.layout = html.Div([
-    html.H1("Vigilance Crypto: Live Anomaly Monitor"),
-    dcc.Interval(id='update-interval', interval=30000, n_intervals=0), # Refresh every 30s
-    dcc.Graph(id='live-graph'),
-    html.Div(id='risk-status')
-])
+app.layout = dbc.Container([
+    dbc.Row([
+        dbc.Col(html.H1("Vigilance Crypto Monitor", className="text-center text-primary mb-4"), width=12)
+    ]),
+    
+    # KPI Row: Real-time Stats
+    dbc.Row([
+        dbc.Col(dbc.Card([
+            dbc.CardBody([
+                html.H4("Current Price", className="card-title"),
+                html.H2(id="live-price", className="text-success")
+            ])
+        ]), width=4),
+        dbc.Col(dbc.Card([
+            dbc.CardBody([
+                html.H4("Risk Score", className="card-title"),
+                html.H2(id="risk-indicator")
+            ])
+        ]), width=4),
+        dbc.Col(dbc.Card([
+            dbc.CardBody([
+                html.H4("Status", className="card-title"),
+                html.H2(id="market-status")
+            ])
+        ]), width=4),
+    ], className="mb-4"),
+
+    # Controls & Graph
+    dbc.Row([
+        dbc.Col([
+            html.Label("Select Asset:"),
+            dcc.Dropdown(
+                id='asset-dropdown',
+                options=[
+                    {'label': 'Bitcoin (BTC)', 'value': 'BTC/USDT'},
+                    {'label': 'Ethereum (ETH)', 'value': 'ETH/USDT'},
+                    {'label': 'Solana (SOL)', 'value': 'SOL/USDT'}
+                ],
+                value='BTC/USDT',
+                className="mb-3 text-dark"
+            ),
+            dcc.Interval(id='update-interval', interval=15000, n_intervals=0), # 15s updates
+            dcc.Graph(id='live-graph')
+        ], width=12)
+    ])
+], fluid=True)
 
 @app.callback(
-    [Output('live-graph', 'figure'), Output('risk-status', 'children')],
-    [Input('update-interval', 'n_intervals')]
+    [Output('live-graph', 'figure'), 
+     Output('live-price', 'children'),
+     Output('risk-indicator', 'children'),
+     Output('market-status', 'children'),
+     Output('risk-indicator', 'className')],
+    [Input('update-interval', 'n_intervals'),
+     Input('asset-dropdown', 'value')]
 )
-def update_dashboard(n):
-    # 1. LIVE PIPELINE: Pull latest 100 hours from Binance
-    ohlcv = exchange.fetch_ohlcv('BTC/USDT', timeframe='1h', limit=100)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-    # 2. Pre-process Live Data
-    df['price_return'] = df['close'].pct_change()
-    df['vol_change'] = df['volume'].pct_change()
-    df['volatility'] = df['price_return'].rolling(window=10).std()
-    df = df.dropna()
-
-    # 3. PREDICT: Ask the AI for a Risk Score
-    scores = model.decision_function(df[features])
-    # Convert score to 0-100 (Higher is riskier)
-    df['risk_score'] = (1 - (scores - scores.min()) / (scores.max() - scores.min())) * 100
-
-    # 4. Visualize
-    fig = px.line(df, x='timestamp', y='close', title="Real-Time BTC/USDT Price")
+def update_dashboard(n, selected_asset):
+    # 1. LIVE PIPELINE: Pull latest data
+    ohlcv = exchange.fetch_ohlcv(selected_asset, timeframe='1h', limit=100)
+    raw_df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     
-    # Highlight anomalies in Red
+    # 2. PREPROCESS
+    df = clean_and_feature_engineer(raw_df)
+
+    # 3. PREDICT
+    scores = model.decision_function(df[features])
+    # Normalize score (Inverted decision_function where more negative = anomaly)
+    df['risk_score'] = (1 - (scores - scores.min()) / (scores.max() - scores.min())) * 100
+    
+    latest_price = df['close'].iloc[-1]
+    latest_risk = df['risk_score'].iloc[-1]
+    
+    # 4. VISUALIZE
+    fig = px.line(df, x='timestamp', y='close', template="plotly_dark", title=f"Real-Time {selected_asset}")
+    
+    # Add Red Dots for Anomalies (> 80 Risk)
     anomalies = df[df['risk_score'] > 80]
     fig.add_scatter(x=anomalies['timestamp'], y=anomalies['close'], 
-                    mode='markers', marker=dict(color='red', size=10), name='ANOMALY')
+                    mode='markers', marker=dict(color='red', size=12), name='ANOMALY FLAG')
 
-    latest_score = df['risk_score'].iloc[-1]
-    status = f"Current Market Risk: {latest_score:.2f}%"
-    
-    return fig, html.H3(status, style={'color': 'red' if latest_score > 80 else 'green'})
+    # Styling Logic
+    risk_color = "text-danger" if latest_risk > 80 else "text-warning" if latest_risk > 50 else "text-success"
+    status_text = "🚨 ALERT: ANOMALY" if latest_risk > 80 else "✅ STABLE"
+
+    return fig, f"${latest_price:,.2f}", f"{latest_risk:.1f}%", status_text, risk_color
 
 if __name__ == '__main__':
     app.run(debug=True)
